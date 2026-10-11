@@ -22,8 +22,18 @@ const Browser = struct {
     selection_update: SelectionUpdate,
 };
 
+const BrowserEntry = struct {
+    next: ?*BrowserEntry,
+    name: [:0]u8,
+    color: rl.Color,
+};
+
 const State = union(enum) {
     browser: Browser,
+};
+
+const Frame = struct {
+    listing_root: ?*BrowserEntry,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -32,6 +42,12 @@ pub fn main(init: std.process.Init) !void {
 
     const io = init.io;
     const allocator = init.gpa;
+
+    const storage: []u8 = try allocator.alloc(u8, 4 * 1024 * 1024);
+    defer allocator.free(storage);
+    var frame_fba = std.heap.FixedBufferAllocator.init(storage);
+
+    const frame_allocator = frame_fba.allocator();
 
     var state: State = .{
         .browser = .{
@@ -46,11 +62,61 @@ pub fn main(init: std.process.Init) !void {
     rl.SetTargetFPS(60);
 
     while (!rl.WindowShouldClose()) {
+        frame_fba.reset();
+        var frame = Frame{
+            .listing_root = null,
+        };
+
         // Update
         switch (state) {
             .browser => |*browser_state| {
-                if (rl.IsKeyPressed(rl.KEY_DOWN)) {
+                if (rl.IsKeyPressed(rl.KEY_UP)) {
                     browser_state.selection_update = .next;
+                } else if (rl.IsKeyPressed(rl.KEY_DOWN)) {
+                    browser_state.selection_update = .previous;
+                }
+
+                var it = browser_state.current_dir.iterate();
+                var previous: ?[]u8 = null;
+                while (try it.next(io)) |entry| {
+                    if (browser_state.selection == null) {
+                        browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{entry.name});
+                    }
+
+                    const buf: [:0]u8 = try frame_allocator.allocSentinel(u8, 256, 0);
+                    @memset(buf, 0);
+
+                    var color = if (entry.kind == .directory) BLUE else WHITE;
+
+                    if (std.mem.eql(u8, entry.name, browser_state.selection.?)) {
+                        if (browser_state.selection_update == .next) {
+                            allocator.free(browser_state.selection.?);
+                            browser_state.selection = null;
+                            browser_state.selection_update = .none;
+                            _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
+                        } else if (browser_state.selection_update == .previous) {
+                            if (previous) |_| {
+                                allocator.free(browser_state.selection.?);
+                                browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                            }
+                            browser_state.selection_update = .none;
+                        } else {
+                            _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
+                            color = RED;
+                        }
+                    } else {
+                        _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
+                    }
+
+                    const next = frame.listing_root;
+                    frame.listing_root = try frame_allocator.create(BrowserEntry);
+                    frame.listing_root.?.* = .{
+                        .next = next,
+                        .name = buf,
+                        .color = color,
+                    };
+
+                    previous = try std.fmt.allocPrint(frame_allocator, "{s}", .{entry.name});
                 }
             },
         }
@@ -60,36 +126,14 @@ pub fn main(init: std.process.Init) !void {
         rl.ClearBackground(BACKGROUND);
 
         switch (state) {
-            .browser => |*browser_state| {
+            .browser => {
                 const x: i32 = 50;
                 var y: i32 = 50;
-                var it = browser_state.current_dir.iterate();
-                while (try it.next(io)) |entry| {
-                    if (browser_state.selection == null) {
-                        browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{entry.name});
-                    }
-
-                    var buf: [128]u8 = undefined;
-                    @memset(&buf, 0);
-
-                    var color = if (entry.kind == .directory) BLUE else WHITE;
-
-                    if (std.mem.eql(u8, entry.name, browser_state.selection.?)) {
-                        if (browser_state.selection_update == .next) {
-                            allocator.free(browser_state.selection.?);
-                            browser_state.selection = null;
-                            browser_state.selection_update = .none;
-                            _ = try std.fmt.bufPrint(&buf, " {s}", .{entry.name});
-                        } else {
-                            _ = try std.fmt.bufPrint(&buf, "> {s}", .{entry.name});
-                            color = RED;
-                        }
-                    } else {
-                        _ = try std.fmt.bufPrint(&buf, " {s}", .{entry.name});
-                    }
-
-                    rl.DrawText(&buf, x, y, 42, color);
+                var it = frame.listing_root;
+                while (it) |entry| {
+                    rl.DrawText(entry.name, x, y, 42, entry.color);
                     y = y + 50;
+                    it = entry.next;
                 }
             },
         }
