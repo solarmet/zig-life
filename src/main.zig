@@ -141,4 +141,10 @@ pub fn main(init: std.process.Init) !void {
         rl.DrawFPS(screen_width - 90, 24);
         rl.EndDrawing();
     }
+
+    switch (state) {
+        .browser => |browser_state| {
+            allocator.free(browser_state.selection.?);
+        },
+    }
 }
