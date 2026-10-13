@@ -20,6 +20,86 @@ const Browser = struct {
     current_dir: std.Io.Dir,
     selection: ?[]u8,
     selection_update: SelectionUpdate,
+
+    fn update(
+        self: *Browser,
+        allocator: std.mem.Allocator,
+        frame_allocator: std.mem.Allocator,
+        io: std.Io,
+    ) !BrowserFrame {
+        var browser_frame: BrowserFrame = .{
+            .entry_head = null,
+            .entry_tail = null,
+        };
+
+        if (rl.IsKeyPressed(rl.KEY_DOWN)) {
+            self.selection_update = .next;
+        } else if (rl.IsKeyPressed(rl.KEY_UP)) {
+            self.selection_update = .previous;
+        }
+
+        var it = self.current_dir.iterate();
+        var previous: ?[]u8 = null;
+        while (try it.next(io)) |entry| {
+            if (self.selection == null) {
+                self.selection = try std.fmt.allocPrint(allocator, "{s}", .{entry.name});
+            }
+
+            const buf: [:0]u8 = try frame_allocator.allocSentinel(u8, 256, 0);
+            @memset(buf, 0);
+
+            var color = if (entry.kind == .directory) BLUE else WHITE;
+
+            if (std.mem.eql(u8, entry.name, self.selection.?)) {
+                if (self.selection_update == .next) {
+                    allocator.free(self.selection.?);
+                    self.selection = null;
+                    self.selection_update = .none;
+                    _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
+                } else if (self.selection_update == .previous) {
+                    if (previous) |_| {
+                        allocator.free(self.selection.?);
+                        self.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                        self.selection_update = .none;
+                    }
+                } else {
+                    _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
+                    color = RED;
+                }
+            } else {
+                _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
+            }
+
+            const previous_entry = browser_frame.entry_tail;
+            browser_frame.entry_tail = try frame_allocator.create(BrowserEntry);
+            if (previous_entry) |e| {
+                e.next = browser_frame.entry_tail;
+            }
+            browser_frame.entry_tail.?.* = .{
+                .next = null,
+                .previous = previous_entry,
+                .name = buf,
+                .color = color,
+            };
+
+            if (browser_frame.entry_head == null) {
+                browser_frame.entry_head = browser_frame.entry_tail;
+            }
+
+            previous = try std.fmt.allocPrint(frame_allocator, "{s}", .{entry.name});
+        }
+
+        if (self.selection_update == .previous) {
+            if (previous) |_| {
+                allocator.free(self.selection.?);
+                self.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+            }
+
+            self.selection_update = .none;
+        }
+
+        return browser_frame;
+    }
 };
 
 const BrowserEntry = struct {
@@ -73,78 +153,8 @@ pub fn main(init: std.process.Init) !void {
 
         // Update
         switch (state) {
-            .browser => |*browser_state| {
-                var browser_frame: BrowserFrame = .{
-                    .entry_head = null,
-                    .entry_tail = null,
-                };
-
-                if (rl.IsKeyPressed(rl.KEY_DOWN)) {
-                    browser_state.selection_update = .next;
-                } else if (rl.IsKeyPressed(rl.KEY_UP)) {
-                    browser_state.selection_update = .previous;
-                }
-
-                var it = browser_state.current_dir.iterate();
-                var previous: ?[]u8 = null;
-                while (try it.next(io)) |entry| {
-                    if (browser_state.selection == null) {
-                        browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{entry.name});
-                    }
-
-                    const buf: [:0]u8 = try frame_allocator.allocSentinel(u8, 256, 0);
-                    @memset(buf, 0);
-
-                    var color = if (entry.kind == .directory) BLUE else WHITE;
-
-                    if (std.mem.eql(u8, entry.name, browser_state.selection.?)) {
-                        if (browser_state.selection_update == .next) {
-                            allocator.free(browser_state.selection.?);
-                            browser_state.selection = null;
-                            browser_state.selection_update = .none;
-                            _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
-                        } else if (browser_state.selection_update == .previous) {
-                            if (previous) |_| {
-                                allocator.free(browser_state.selection.?);
-                                browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
-                                browser_state.selection_update = .none;
-                            }
-                        } else {
-                            _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
-                            color = RED;
-                        }
-                    } else {
-                        _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
-                    }
-
-                    const previous_entry = browser_frame.entry_tail;
-                    browser_frame.entry_tail = try frame_allocator.create(BrowserEntry);
-                    if (previous_entry) |e| {
-                        e.next = browser_frame.entry_tail;
-                    }
-                    browser_frame.entry_tail.?.* = .{
-                        .next = null,
-                        .previous = previous_entry,
-                        .name = buf,
-                        .color = color,
-                    };
-
-                    if (browser_frame.entry_head == null) {
-                        browser_frame.entry_head = browser_frame.entry_tail;
-                    }
-
-                    previous = try std.fmt.allocPrint(frame_allocator, "{s}", .{entry.name});
-                }
-
-                if (browser_state.selection_update == .previous) {
-                    if (previous) |_| {
-                        allocator.free(browser_state.selection.?);
-                        browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
-                    }
-
-                    browser_state.selection_update = .none;
-                }
-
+            .browser => |*browser| {
+                const browser_frame = try browser.update(allocator, frame_allocator, io);
                 frame = .{ .browser = browser_frame };
             },
         }
@@ -153,19 +163,15 @@ pub fn main(init: std.process.Init) !void {
         rl.BeginDrawing();
         rl.ClearBackground(BACKGROUND);
 
-        switch (state) {
-            .browser => {
-                switch (frame) {
-                    .browser => |browser_frame| {
-                        const x: i32 = 50;
-                        var y: i32 = 50;
-                        var it = browser_frame.entry_head;
-                        while (it) |entry| {
-                            rl.DrawText(entry.name, x, y, 42, entry.color);
-                            y = y + 50;
-                            it = entry.next;
-                        }
-                    },
+        switch (frame) {
+            .browser => |browser_frame| {
+                const x: i32 = 50;
+                var y: i32 = 50;
+                var it = browser_frame.entry_head;
+                while (it) |entry| {
+                    rl.DrawText(entry.name, x, y, 42, entry.color);
+                    y = y + 50;
+                    it = entry.next;
                 }
             },
         }
