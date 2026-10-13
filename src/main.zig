@@ -24,6 +24,7 @@ const Browser = struct {
 
 const BrowserEntry = struct {
     next: ?*BrowserEntry,
+    previous: ?*BrowserEntry,
     name: [:0]u8,
     color: rl.Color,
 };
@@ -32,8 +33,13 @@ const State = union(enum) {
     browser: Browser,
 };
 
-const Frame = struct {
-    listing_root: ?*BrowserEntry,
+const BrowserFrame = struct {
+    entry_head: ?*BrowserEntry,
+    entry_tail: ?*BrowserEntry,
+};
+
+const Frame = union(enum) {
+    browser: BrowserFrame,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -63,16 +69,19 @@ pub fn main(init: std.process.Init) !void {
 
     while (!rl.WindowShouldClose()) {
         frame_fba.reset();
-        var frame = Frame{
-            .listing_root = null,
-        };
+        var frame: Frame = undefined;
 
         // Update
         switch (state) {
             .browser => |*browser_state| {
-                if (rl.IsKeyPressed(rl.KEY_UP)) {
+                var browser_frame: BrowserFrame = .{
+                    .entry_head = null,
+                    .entry_tail = null,
+                };
+
+                if (rl.IsKeyPressed(rl.KEY_DOWN)) {
                     browser_state.selection_update = .next;
-                } else if (rl.IsKeyPressed(rl.KEY_DOWN)) {
+                } else if (rl.IsKeyPressed(rl.KEY_UP)) {
                     browser_state.selection_update = .previous;
                 }
 
@@ -98,8 +107,8 @@ pub fn main(init: std.process.Init) !void {
                             if (previous) |_| {
                                 allocator.free(browser_state.selection.?);
                                 browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                                browser_state.selection_update = .none;
                             }
-                            browser_state.selection_update = .none;
                         } else {
                             _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
                             color = RED;
@@ -108,16 +117,35 @@ pub fn main(init: std.process.Init) !void {
                         _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
                     }
 
-                    const next = frame.listing_root;
-                    frame.listing_root = try frame_allocator.create(BrowserEntry);
-                    frame.listing_root.?.* = .{
-                        .next = next,
+                    const previous_entry = browser_frame.entry_tail;
+                    browser_frame.entry_tail = try frame_allocator.create(BrowserEntry);
+                    if (previous_entry) |e| {
+                        e.next = browser_frame.entry_tail;
+                    }
+                    browser_frame.entry_tail.?.* = .{
+                        .next = null,
+                        .previous = previous_entry,
                         .name = buf,
                         .color = color,
                     };
 
+                    if (browser_frame.entry_head == null) {
+                        browser_frame.entry_head = browser_frame.entry_tail;
+                    }
+
                     previous = try std.fmt.allocPrint(frame_allocator, "{s}", .{entry.name});
                 }
+
+                if (browser_state.selection_update == .previous) {
+                    if (previous) |_| {
+                        allocator.free(browser_state.selection.?);
+                        browser_state.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                    }
+
+                    browser_state.selection_update = .none;
+                }
+
+                frame = .{ .browser = browser_frame };
             },
         }
 
@@ -127,13 +155,17 @@ pub fn main(init: std.process.Init) !void {
 
         switch (state) {
             .browser => {
-                const x: i32 = 50;
-                var y: i32 = 50;
-                var it = frame.listing_root;
-                while (it) |entry| {
-                    rl.DrawText(entry.name, x, y, 42, entry.color);
-                    y = y + 50;
-                    it = entry.next;
+                switch (frame) {
+                    .browser => |browser_frame| {
+                        const x: i32 = 50;
+                        var y: i32 = 50;
+                        var it = browser_frame.entry_head;
+                        while (it) |entry| {
+                            rl.DrawText(entry.name, x, y, 42, entry.color);
+                            y = y + 50;
+                            it = entry.next;
+                        }
+                    },
                 }
             },
         }
