@@ -7,8 +7,10 @@ const rl = @import("raylib");
 
 const BACKGROUND = rl.Color{ .r = 24, .g = 27, .b = 38, .a = 255 };
 const WHITE = rl.Color{ .r = 245, .g = 247, .b = 250, .a = 255 };
-const BLUE = rl.Color{ .r = 20, .g = 20, .b = 250, .a = 255 };
+const BLUE = rl.Color{ .r = 200, .g = 200, .b = 250, .a = 255 };
 const RED = rl.Color{ .r = 255, .g = 20, .b = 20, .a = 255 };
+const SCREEN_WIDTH: c_int = 1920;
+const SCREEN_HEIGHT: c_int = 1080;
 
 const State = union(enum) {
     browser: Browser,
@@ -19,9 +21,6 @@ const Frame = union(enum) {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const screen_width: c_int = 1920;
-    const screen_height: c_int = 1080;
-
     const io = init.io;
     const allocator = init.gpa;
 
@@ -36,10 +35,12 @@ pub fn main(init: std.process.Init) !void {
             .current_dir = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true }),
             .selection = null,
             .selection_update = .none,
+            .selection_is_dir = false,
+            .simulation = null,
         },
     };
 
-    rl.InitWindow(screen_width, screen_height, "Life");
+    rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Life");
     defer rl.CloseWindow();
     rl.SetTargetFPS(60);
 
@@ -72,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
             },
         }
 
-        rl.DrawFPS(screen_width - 90, 24);
+        rl.DrawFPS(SCREEN_WIDTH - 90, 24);
         rl.EndDrawing();
     }
 
@@ -86,7 +87,9 @@ pub fn main(init: std.process.Init) !void {
 const Browser = struct {
     current_dir: std.Io.Dir,
     selection: ?[]u8,
+    selection_is_dir: bool,
     selection_update: SelectionUpdate,
+    simulation: ?std.Io.File,
 
     const Entry = struct {
         next: ?*Entry,
@@ -104,6 +107,7 @@ const Browser = struct {
         none,
         next,
         previous,
+        into,
     };
 
     fn update(
@@ -121,13 +125,28 @@ const Browser = struct {
             self.selection_update = .next;
         } else if (rl.IsKeyPressed(rl.KEY_UP)) {
             self.selection_update = .previous;
+        } else if (rl.IsKeyPressed(rl.KEY_ENTER)) {
+            self.selection_update = .into;
+        }
+
+        if (self.selection_update == .into) {
+            if (self.selection_is_dir) {
+                const child = try self.current_dir.openDir(io, self.selection.?, .{ .iterate = true });
+                self.current_dir.close(io);
+                self.current_dir = child;
+                self.selection_update = .none;
+                self.selection = null;
+                self.selection_is_dir = false;
+            }
         }
 
         var it = self.current_dir.iterate();
         var previous: ?[]u8 = null;
+        var previous_is_dir: bool = false;
         while (try it.next(io)) |entry| {
             if (self.selection == null) {
                 self.selection = try std.fmt.allocPrint(allocator, "{s}", .{entry.name});
+                self.selection_is_dir = entry.kind == .directory;
             }
 
             const buf: [:0]u8 = try frame_allocator.allocSentinel(u8, 256, 0);
@@ -136,23 +155,31 @@ const Browser = struct {
             var color = if (entry.kind == .directory) BLUE else WHITE;
 
             if (std.mem.eql(u8, entry.name, self.selection.?)) {
-                if (self.selection_update == .next) {
-                    allocator.free(self.selection.?);
-                    self.selection = null;
-                    self.selection_update = .none;
-                    _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
-                } else if (self.selection_update == .previous) {
-                    if (previous) |_| {
+                switch (self.selection_update) {
+                    .next => {
                         allocator.free(self.selection.?);
-                        self.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                        self.selection = null;
                         self.selection_update = .none;
-                    }
-                } else {
-                    _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
-                    color = RED;
+                        _ = try std.fmt.bufPrint(buf, "  {s}", .{entry.name});
+                    },
+                    .previous => {
+                        if (previous) |_| {
+                            allocator.free(self.selection.?);
+                            self.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                            self.selection_is_dir = previous_is_dir;
+                            self.selection_update = .none;
+                        }
+                    },
+                    .into => {
+                        self.selection_update = .none;
+                    },
+                    .none => {
+                        _ = try std.fmt.bufPrint(buf, "> {s}", .{entry.name});
+                        color = RED;
+                    },
                 }
             } else {
-                _ = try std.fmt.bufPrint(buf, " {s}", .{entry.name});
+                _ = try std.fmt.bufPrint(buf, "  {s}", .{entry.name});
             }
 
             const previous_entry = browser_frame.entry_tail;
@@ -172,12 +199,14 @@ const Browser = struct {
             }
 
             previous = try std.fmt.allocPrint(frame_allocator, "{s}", .{entry.name});
+            previous_is_dir = entry.kind == .directory;
         }
 
         if (self.selection_update == .previous) {
             if (previous) |_| {
                 allocator.free(self.selection.?);
                 self.selection = try std.fmt.allocPrint(allocator, "{s}", .{previous.?});
+                self.selection_is_dir = previous_is_dir;
             }
 
             self.selection_update = .none;
